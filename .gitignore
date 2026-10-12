@@ -4,3 +4,9 @@ output
 data
 .vscode
 *pkl
+domain_transfer/checkpoints/*
+domain_transfer/verify_labelled/*
+domain_transfer/verify_unlabelled/*
+domain_transfer/unlabelled_index.json
+domain_transfer/labelled_index.json
+

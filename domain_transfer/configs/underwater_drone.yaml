@@ -1,0 +1,121 @@
+# FoundYou adapter domain transfer: land-trained SAM2 -> BeeX turbid underwater.
+#
+# What actually moves during training
+# -----------------------------------
+# SAM 2-small is frozen. Only the AdaptFormer adapters train (2.45 M of
+# 52.4 M params, 4.7%). That is not a shortcut -- it is what the published
+# FoundYou checkpoint itself contains: 167 tensors / 5.88 M params, being the
+# adapters plus the RETRIEVAL decoder. The segmentation head (sam_mask_decoder)
+# is absent from it and runs stock SAM2 weights, so for the segmentation task
+# the adapters are the only surface that adapts. Same idea as the DINOv3 ->
+# MobileViT distillation: a small trainable module in front of a large frozen
+# backbone.
+
+run_name: underwater_drone_adapters
+description: >
+  Personalized segmentation domain transfer on BeeX front-camera drone footage
+  (front_all_20260727): 258 labelled frames of the BeeX drone in turbid water.
+
+paths:
+  # Built by index_labelled.py from the COCO label zips in both stores.
+  labelled_index: labelled_index.json
+  # Only used when data.source = front_mask (legacy single-class path).
+  data_root: /mnt/BeeX-Ashwin/Vision_Tools/Online_Registration/Yolo_Seg/ml_datasets/front_all_20260727
+  # Start from the released FoundYou weights, not from scratch: a HF repo id,
+  # a local .safetensors/.pth, or a folder with model.safetensors.
+  checkpoint: gabTriv/FoundYou
+  model_config: configs/pers_seg.yaml
+  output_dir: domain_transfer/checkpoints/underwater_drone_adapters
+  resume_from: ""
+
+data:
+  # coco       all 15 annotated classes, 165 recordings, ~8.8k frames
+  # front_mask legacy: the single `body` class from front_all_20260727
+  source: coco
+  img_size: 518
+  val_fraction: 0.2
+  episodes_per_epoch: 300
+  augment: true
+
+  # --- source: coco ---
+  # Empty = use every class. Narrow it to focus, e.g. [member, anode, cable].
+  classes: []
+  # Only train on frames holding ONE instance of the class. COCO has no
+  # instance identity across frames, so with several anodes in view there is no
+  # way to know which one was prompted; the mask is their union. That is 7.6%
+  # of frame-class pairs. Leave false to use everything.
+  single_instance_only: false
+  # Skip an episode whose rasterised mask is this small -- nothing to point at.
+  min_mask_fraction: 0.001
+
+  # --- source: front_mask ---
+  # labels_mask is INVERTED there: 0 = drone, 1 = everything else. Verified
+  # against the polygons -- IoU 0.9974 inverted vs 0.0001 direct.
+  mask_invert: true
+  temporal_split: true
+  min_frame_gap: 10
+
+training:
+  # Measured on this dataset: val mIoU peaks at epoch 8 (85.04%) and then
+  # decays to 81.1% by epoch 30 while train loss keeps falling 0.126 -> 0.085
+  # -- textbook overfitting on 206 training frames. 12 clears the peak with
+  # margin and saves ~18 min. adapters_best.pth tracks the best epoch anyway,
+  # so a longer run is wasted time rather than a worse checkpoint.
+  epochs: 100
+  # One episode ~2.9 GB at 518px (reference + query, both upscaled to SAM2's
+  # 1024 internally), so the real batch is 1. accum_steps is what gives an
+  # effective batch without the memory.
+  batch_size: 1
+  accum_steps: 8
+  lr: 0.0001
+  min_lr: 0.000001
+  weight_decay: 0.0001
+  grad_clip: 1.0
+  warmup_steps: 50
+  num_workers: 4
+  seed: 17
+  amp: true
+  checkpoint_every: 1
+  val_every: 1
+  # 0 = every fixed validation episode.
+  val_max_episodes: 0
+  # Also unfreeze sam_mask_decoder (+4.08 M). Off by default: with 258 frames
+  # of one object it mostly costs SAM2's general mask prior. Try it only after
+  # adapters-only has been measured.
+  train_mask_decoder: false
+
+loss:
+  bce_weight: 1.0
+  dice_weight: 1.0
+
+# Semi-supervised: the 206 labelled frames keep the model honest, the
+# unlabelled corpus adds domain coverage it could never get from 206 frames.
+#
+# The unlabelled term is cycle-consistency: segment frame t, propagate the mask
+# to t+k, propagate it back, require the round trip to agree. Measured on three
+# recordings before building this, cycle IoU came out 0.85 / 0.40 / 0.83 with
+# mask areas steady near 0.18 -- real signal, and no collapse to empty or full.
+semisup:
+  enabled: true
+  # Build with: python3 index_unlabelled.py
+  index_path: unlabelled_index.json
+  # Unlabelled steps cost ~3 forward passes against 1 for a labelled step, so
+  # this is the main lever on epoch time.
+  pairs_per_epoch: 150
+  # Frames apart within one recording. Too close and the round trip is trivial;
+  # too far and the object has left the view.
+  frame_gap: [3, 15]
+  # Weight on the cycle term. Ramped in from 0 over warmup_epochs so the
+  # labelled anchor establishes itself before self-training starts.
+  weight: 0.5
+  warmup_epochs: 2
+  # Skip a cycle whose seed mask is degenerate -- no signal in an empty or
+  # frame-filling mask, and training on them is what invites collapse.
+  min_area: 0.02
+  max_area: 0.90
+
+eval:
+  # mask | box | point -- how the reference is prompted. mask is FoundYou's
+  # default and the strongest prompt.
+  prompt: mask
+  threshold: 0.5
