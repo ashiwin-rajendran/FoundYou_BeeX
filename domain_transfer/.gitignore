@@ -11,3 +11,7 @@ __pycache__/
 # Human-inspection renders from index_labelled.py / index_unlabelled.py
 verify_labelled/
 verify_unlabelled/
+
+# Output of predict.py -- regenerate anytime
+predict_out/
+predict_body/
